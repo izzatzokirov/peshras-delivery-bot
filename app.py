@@ -22,10 +22,22 @@ def send_to_telegram(message):
             "text": message,
             "parse_mode": "HTML"
         }
-        response = requests.post(url, json=payload)
-        return response.status_code == 200
+        
+        logger.info(f"📤 Отправляем сообщение в Telegram: {payload}")
+        
+        response = requests.post(url, json=payload, timeout=10)
+        response_data = response.json()
+        
+        logger.info(f"📨 Ответ от Telegram API: {response_data}")
+        
+        if response.status_code == 200 and response_data.get('ok'):
+            return True
+        else:
+            logger.error(f"❌ Ошибка Telegram API: {response_data}")
+            return False
+            
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки в Telegram: {e}")
+        logger.error(f"❌ Ошибка отправки в Telegram: {str(e)}")
         return False
 
 # Webhook для приема заказов
@@ -34,38 +46,25 @@ def webhook():
     try:
         logger.info("📨 Получен запрос от storelend")
         
-        # Пробуем получить данные в разных форматах
-        order_data = {}
+        # Логируем заголовки для отладки
+        logger.info(f"📋 Заголовки: {dict(request.headers)}")
         
-        # 1. Пробуем JSON
-        try:
-            data = request.get_json()
-            if data and isinstance(data, dict):
-                if 'order_data' in data:
-                    order_data = data['order_data']
-                    logger.info("✅ Данные получены в формате JSON с order_data")
-                else:
-                    order_data = data
-                    logger.info("✅ Данные получены как прямой JSON")
-        except:
-            pass
+        # Получаем form-data
+        order_data_str = request.form.get('order_data')
         
-        # 2. Пробуем form-data
-        if not order_data:
-            try:
-                order_data_str = request.form.get('order_data')
-                if order_data_str:
-                    import json
-                    order_data = json.loads(order_data_str)
-                    logger.info("✅ Данные получены как form-data")
-            except:
-                pass
-        
-        # Если данные не получены
-        if not order_data:
+        if not order_data_str:
             raw_data = request.get_data(as_text=True)
-            logger.error(f"❌ Не удалось распарсить данные. Сырые данные: {raw_data}")
-            return jsonify({"status": "error", "message": "Invalid data format"}), 400
+            logger.error(f"❌ Нет order_data в form-data. Все данные: {raw_data}")
+            return jsonify({"status": "error", "message": "No order_data provided"}), 400
+        
+        # Парсим JSON из order_data
+        try:
+            import json
+            order_data = json.loads(order_data_str)
+            logger.info(f"✅ Данные заказа: {order_data}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга JSON: {e}, данные: {order_data_str}")
+            return jsonify({"status": "error", "message": "Invalid JSON format"}), 400
         
         # Формируем сообщение для Telegram
         message = f"🛒 <b>НОВЫЙ ЗАКАЗ</b> #{order_data.get('id', 'N/A')}\n"
