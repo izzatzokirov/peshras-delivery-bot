@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 # КОНФИГУРАЦИЯ - ВАШИ ДАННЫЕ
 BOT_TOKEN = "8338994662:AAH7FALz3qd3F9dzcPadCVQY6CRPBXtFxiA"
-CHANNEL_ID = "-1002108941132"
+CHANNEL_ID = "@peshras24"
 
 # Функция отправки сообщения в Telegram
 def send_to_telegram(message):
