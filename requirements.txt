@@ -1,7 +1,2 @@
-services:
-  - type: web
-    name: peshras-bot-simple
-    env: python
-    plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+Flask==2.3.3
+requests==2.31.0
