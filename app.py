@@ -3,7 +3,7 @@ from telegram.ext import Application, CallbackQueryHandler, ContextTypes
 from flask import Flask, request, jsonify
 import os
 import logging
-import threading
+import time
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -18,27 +18,32 @@ CHANNEL_ID = os.getenv("CHANNEL_ID", "-1002108941132")
 # Глобальная переменная для бота
 bot_application = None
 
-def run_bot():
-    """Запуск бота в отдельном потоке"""
+def initialize_bot():
+    """Инициализация бота"""
     global bot_application
     try:
         bot_application = Application.builder().token(BOT_TOKEN).build()
         bot_application.add_handler(CallbackQueryHandler(button_handler))
-        logger.info("✅ Бот инициализирован, запускаем polling...")
-        bot_application.run_polling()
+        
+        # Запускаем бота в фоновом режиме
+        bot_application.initialize()
+        bot_application.start()
+        bot_application.updater.running = True
+        
+        logger.info("✅ Бот успешно инициализирован!")
+        return True
     except Exception as e:
-        logger.error(f"❌ Ошибка запуска бота: {e}")
-
-# Запускаем бот в отдельном потоке при старте
-bot_thread = threading.Thread(target=run_bot, daemon=True)
-bot_thread.start()
+        logger.error(f"❌ Ошибка инициализации бота: {e}")
+        return False
 
 # Функция отправки заказа в канал
 def send_order_to_channel(order_data):
+    global bot_application
     try:
         if bot_application is None:
-            logger.error("❌ Бот не инициализирован")
-            return False
+            logger.error("❌ Бот не инициализирован, пытаемся инициализировать...")
+            if not initialize_bot():
+                return False
 
         message_text = f"🛒 НОВЫЙ ЗАКАЗ #_{order_data.get('id', 'N/A')}_\n"
         message_text += f"👤 Имя: {order_data.get('customer_name', 'N/A')}\n"
@@ -80,35 +85,28 @@ def send_order_to_channel(order_data):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # Логируем сырые данные для отладки
-        raw_data = request.get_data(as_text=True)
-        logger.info(f"📨 Получены сырые данные: {raw_data}")
+        # Логируем факт получения запроса
+        logger.info("📨 Получен запрос от storelend")
         
         # Пробуем разные форматы данных
         order_data = {}
         
-        # Вариант 1: JSON с полем order_data
+        # Вариант 1: JSON данные
         try:
-            data = request.json
-            if data and 'order_data' in data:
-                order_data = data['order_data']
-                logger.info("✅ Данные получены в формате JSON с order_data")
-        except:
-            pass
-        
-        # Вариант 2: Прямой JSON в теле запроса
-        if not order_data:
-            try:
-                order_data = request.json
-                if order_data:
+            data = request.get_json()
+            if data:
+                if 'order_data' in data:
+                    order_data = data['order_data']
+                    logger.info("✅ Данные получены в формате JSON с order_data")
+                else:
+                    order_data = data
                     logger.info("✅ Данные получены как прямой JSON")
-            except:
-                pass
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось распарсить как JSON: {e}")
         
-        # Вариант 3: Form-data или другие форматы
+        # Вариант 2: Form-data
         if not order_data:
             try:
-                # Пробуем получить как form-data
                 order_data_str = request.form.get('order_data')
                 if order_data_str:
                     import json
@@ -117,19 +115,24 @@ def webhook():
             except:
                 pass
         
-        # Если все варианты не сработали
+        # Если данные не получены
         if not order_data:
-            logger.error("❌ Не удалось распарсить данные заказа")
+            # Покажем что пришло для отладки
+            raw_data = request.get_data(as_text=True)
+            logger.error(f"❌ Не удалось распарсить данные. Сырые данные: {raw_data}")
             return jsonify({"status": "error", "message": "Invalid data format"}), 400
+        
+        # Логируем полученные данные
+        logger.info(f"📦 Данные заказа: {order_data}")
         
         # Отправляем заказ в Telegram канал
         success = send_order_to_channel(order_data)
         
         if success:
-            logger.info(f"✅ Заказ #{order_data.get('id')} отправлен в Telegram")
+            logger.info(f"✅ Заказ отправлен в Telegram")
             return jsonify({"status": "success", "message": "Order processed"})
         else:
-            logger.error(f"❌ Ошибка отправки заказа #{order_data.get('id')} in Telegram")
+            logger.error(f"❌ Ошибка отправки заказа в Telegram")
             return jsonify({"status": "error", "message": "Telegram send failed"}), 500
             
     except Exception as e:
@@ -156,6 +159,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def home():
     return "Peshras Delivery Bot is running!"
 
+# Инициализируем бот при запуске
 if __name__ == '__main__':
     logger.info("🚀 Запуск приложения Peshras Delivery Bot...")
+    
+    # Пытаемся инициализировать бота
+    if initialize_bot():
+        logger.info("✅ Приложение готово к работе!")
+    else:
+        logger.error("❌ Не удалось инициализировать бота")
+    
     app.run(host='0.0.0.0', port=5000, debug=False)
