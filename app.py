@@ -1,49 +1,66 @@
-from flask import Flask, request, jsonify
-import requests
-import os
-
-app = Flask(__name__)
-
-BOT_TOKEN = '8338994662:AAH7FALz3qd3F9dzcPadCVQY6CRPBXtFxiA'
-CHANNEL_ID = '-1002108941132'
-
-def send_to_telegram(message):
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": CHANNEL_ID,
-            "text": message,
-            "parse_mode": "HTML"
-        }
-        requests.post(url, json=payload)
-        return True
-    except:
-        return False
-
+# Webhook для приема заказов от storelend.ru
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.json
-        order_data = data.get('order_data', {})
+        # Логируем сырые данные для отладки
+        raw_data = request.get_data(as_text=True)
+        logger.info(f"📨 Получены сырые данные: {raw_data}")
         
-        message = f"🛒 <b>НОВЫЙ ЗАКАЗ #{order_data.get('id', 'N/A')}</b>\n"
-        message += f"👤 <b>Имя:</b> {order_data.get('customer_name', 'N/A')}\n"
-        message += f"📞 <b>Телефон:</b> {order_data.get('customer_phone', 'N/A')}\n"
-        message += f"🏠 <b>Адрес:</b> {order_data.get('customer_address', 'N/A')}\n\n"
+        # Пробуем разные форматы данных
+        order_data = {}
         
-        message += "✅ Для принятия заказа ответьте на это сообщение"
-
-        if send_to_telegram(message):
-            return jsonify({"status": "success"})
+        # Вариант 1: JSON с полем order_data
+        try:
+            data = request.json
+            if data and 'order_data' in data:
+                order_data = data['order_data']
+                logger.info("✅ Данные получены в формате JSON с order_data")
+        except:
+            pass
+        
+        # Вариант 2: Прямой JSON в теле запроса
+        if not order_data:
+            try:
+                order_data = request.json
+                if order_data:
+                    logger.info("✅ Данные получены как прямой JSON")
+            except:
+                pass
+        
+        # Вариант 3: Form-data или другие форматы
+        if not order_data:
+            try:
+                # Пробуем получить как form-data
+                order_data_str = request.form.get('order_data')
+                if order_data_str:
+                    import json
+                    order_data = json.loads(order_data_str)
+                    logger.info("✅ Данные получены как form-data")
+            except:
+                pass
+        
+        # Если все варианты не сработали
+        if not order_data:
+            logger.error("❌ Не удалось распарсить данные заказа")
+            logger.error(f"Сырые данные: {raw_data}")
+            logger.error(f"Заголовки: {dict(request.headers)}")
+            return jsonify({"status": "error", "message": "Invalid data format"}), 400
+        
+        # Логируем распарсенные данные
+        logger.info(f"📦 Распарсенные данные заказа: {order_data}")
+        
+        # Отправляем заказ в Telegram канал
+        success = asyncio.run(send_order_to_channel(order_data))
+        
+        if success:
+            logger.info(f"✅ Заказ #{order_data.get('id')} отправлен в Telegram")
+            return jsonify({"status": "success", "message": "Order processed"})
         else:
-            return jsonify({"status": "error"}), 500
-
+            logger.error(f"❌ Ошибка отправки заказа #{order_data.get('id')} в Telegram")
+            return jsonify({"status": "error", "message": "Telegram send failed"}), 500
+            
     except Exception as e:
-        return jsonify({"status": "error"}), 400
-
-@app.route('/')
-def home():
-    return "Peshras Bot Working!"
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+        logger.error(f"❌ Ошибка обработки webhook: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"status": "error", "message": str(e)}), 400
