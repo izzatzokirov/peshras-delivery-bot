@@ -103,3 +103,86 @@ def home():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
+    # Добавьте эти импорты в начало файла
+from threading import Thread
+import time
+
+# Глобальный словарь для отслеживания заказов
+orders_status = {}
+
+# Функция для обработки нажатий кнопок
+def handle_callback_updates():
+    """Отдельный поток для обработки нажатий кнопок"""
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+            response = requests.get(url, timeout=10)
+            data = response.json()
+            
+            if data["ok"] and data["result"]:
+                for update in data["result"]:
+                    if "callback_query" in update:
+                        query = update["callback_query"]
+                        message_id = query["message"]["message_id"]
+                        callback_data = query["data"]
+                        username = query["from"].get("username", query["from"]["first_name"])
+                        
+                        # Обрабатываем разные действия
+                        if callback_data.startswith("accept_"):
+                            order_num = callback_data.split("_")[1]
+                            orders_status[order_num] = {"status": "принят", "courier": username}
+                            
+                            # Обновляем сообщение
+                            new_text = query["message"]["text"] + f"\n\n✅ Принял: @{username}"
+                            edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+                            payload = {
+                                "chat_id": CHANNEL_ID,
+                                "message_id": message_id,
+                                "text": new_text,
+                                "parse_mode": "HTML"
+                            }
+                            requests.post(edit_url, json=payload)
+                            
+                        elif callback_data.startswith("delivery_"):
+                            order_num = callback_data.split("_")[1]
+                            orders_status[order_num] = {"status": "в пути", "courier": username}
+                            
+                            new_text = query["message"]["text"] + f"\n\n🚗 В пути: @{username}"
+                            edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+                            payload = {
+                                "chat_id": CHANNEL_ID,
+                                "message_id": message_id,
+                                "text": new_text,
+                                "parse_mode": "HTML"
+                            }
+                            requests.post(edit_url, json=payload)
+                            
+                        elif callback_data.startswith("delivered_"):
+                            order_num = callback_data.split("_")[1]
+                            orders_status[order_num] = {"status": "доставлен", "courier": username}
+                            
+                            new_text = query["message"]["text"] + f"\n\n✅ Доставлен: @{username}"
+                            edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+                            payload = {
+                                "chat_id": CHANNEL_ID,
+                                "message_id": message_id,
+                                "text": new_text,
+                                "parse_mode": "HTML"
+                            }
+                            requests.post(edit_url, json=payload)
+                        
+                        # Подтверждаем обработку callback
+                        answer_url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+                        requests.post(answer_url, json={"callback_query_id": query["id"]})
+            
+            time.sleep(1)  # Проверяем каждую секунду
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в обработке кнопок: {e}")
+            time.sleep(5)
+
+# Запускаем обработчик кнопок в отдельном потоке
+callback_thread = Thread(target=handle_callback_updates, daemon=True)
+callback_thread.start()
+
+logger.info("✅ Обработчик кнопок запущен!")
