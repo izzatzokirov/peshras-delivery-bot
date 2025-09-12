@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 import requests
-import os
 import logging
+from datetime import datetime
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -9,87 +9,86 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# КОНФИГУРАЦИЯ - ВАШИ ДАННЫЕ
+# КОНФИГУРАЦИЯ
 BOT_TOKEN = "8338994662:AAH7FALz3qd3F9dzcPadCVQY6CRPBXtFxiA"
 CHANNEL_ID = "-1002967095913"
 
-# Функция отправки сообщения в Telegram
-def send_to_telegram(message):
+# Функция отправки в Telegram с кнопками
+def send_to_telegram(order_data):
     try:
+        # Формируем сообщение
+        message = f"🛒 <b>НОВЫЙ ЗАКАЗ</b> #{order_data.get('order_num', 'N/A')}\n"
+        message += f"👤 <b>Имя:</b> {order_data.get('order_person', 'N/A')}\n"
+        message += f"📞 <b>Телефон:</b> {order_data.get('order_phone', 'N/A')}\n"
+        message += f"🏠 <b>Адрес:</b> {order_data.get('order_city', 'N/A')}, {order_data.get('order_address', 'N/A')}\n"
+        message += f"💰 <b>Сумма:</b> {order_data.get('order_sum', 0)} сомони\n\n"
+        
+        message += "📦 <b>Состав заказа:</b>\n"
+        if 'line' in order_data and isinstance(order_data['line'], list):
+            for item in order_data['line']:
+                if item.get('order_line_type_id') == 1:  # Только товары
+                    message += f"• {item.get('order_line_name', 'Товар')} x {item.get('order_line_quantity', 1)} - {item.get('order_line_sum', 0)} сомони\n"
+        
+        message += f"\n⏰ <b>Время:</b> {convert_unix_time(order_data.get('order_time', ''))}\n"
+        message += f"💬 <b>Комментарий:</b> {order_data.get('order_comment', 'Нет комментария')}\n"
+
+        # Создаем кнопки для курьеров
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Принять заказ", "callback_data": f"accept_{order_data.get('order_num')}"},
+                    {"text": "🚗 В пути", "callback_data": f"delivery_{order_data.get('order_num')}"}
+                ],
+                [
+                    {"text": "✅ Доставлен", "callback_data": f"delivered_{order_data.get('order_num')}"}
+                ]
+            ]
+        }
+
+        # Отправляем сообщение с кнопками
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": CHANNEL_ID,
             "text": message,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
+            "reply_markup": keyboard
         }
         
-        logger.info(f"📤 Отправляем сообщение в Telegram: {payload}")
-        
         response = requests.post(url, json=payload, timeout=10)
-        response_data = response.json()
+        return response.status_code == 200
         
-        logger.info(f"📨 Ответ от Telegram API: {response_data}")
-        
-        if response.status_code == 200 and response_data.get('ok'):
-            return True
-        else:
-            logger.error(f"❌ Ошибка Telegram API: {response_data}")
-            return False
-            
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки в Telegram: {str(e)}")
+        logger.error(f"❌ Ошибка отправки в Telegram: {e}")
         return False
 
-# Webhook для приема заказов
+# Конвертация Unix time
+def convert_unix_time(unix_time):
+    try:
+        return datetime.fromtimestamp(int(unix_time)).strftime('%Y-%m-%d %H:%M:%S')
+    except:
+        return unix_time
+
+# Webhook для storelend.ru
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        logger.info("📨 Получен запрос от storelend")
+        logger.info("📨 Получен заказ от storelend.ru")
         
-        # Логируем заголовки для отладки
-        logger.info(f"📋 Заголовки: {dict(request.headers)}")
-        
-        # Получаем form-data
+        # Получаем данные из form-data
         order_data_str = request.form.get('order_data')
         
         if not order_data_str:
-            raw_data = request.get_data(as_text=True)
-            logger.error(f"❌ Нет order_data в form-data. Все данные: {raw_data}")
             return jsonify({"status": "error", "message": "No order_data provided"}), 400
         
-        # Парсим JSON из order_data
-        try:
-            import json
-            order_data = json.loads(order_data_str)
-            logger.info(f"✅ Данные заказа: {order_data}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка парсинга JSON: {e}, данные: {order_data_str}")
-            return jsonify({"status": "error", "message": "Invalid JSON format"}), 400
+        # Парсим JSON
+        import json
+        order_data = json.loads(order_data_str)
         
-        # Формируем сообщение для Telegram
-        message = f"🛒 <b>НОВЫЙ ЗАКАЗ</b> #{order_data.get('id', 'N/A')}\n"
-        message += f"👤 <b>Имя:</b> {order_data.get('customer_name', 'N/A')}\n"
-        message += f"📞 <b>Телефон:</b> {order_data.get('customer_phone', 'N/A')}\n"
-        message += f"🏠 <b>Адрес:</b> {order_data.get('customer_address', 'N/A')}\n\n"
-        
-        message += "📦 <b>Состав заказа:</b>\n"
-        items = order_data.get('items', [])
-        if isinstance(items, list):
-            for item in items:
-                message += f"• {item.get('name', 'Товар')} x {item.get('quantity', 1)} - {item.get('price', 0)} сомони\n"
-        else:
-            message += "• Информация о товарах недоступна\n"
-        
-        message += f"\n💵 <b>Сумма:</b> {order_data.get('total_amount', 0)} сомони\n"
-        message += f"⏰ <b>Время:</b> {order_data.get('order_time', 'N/A')}\n\n"
-        
-        message += "⚡ <i>Курьеры: ответьте на это сообщение чтобы взять заказ</i>"
-        
-        # Отправляем в Telegram
-        success = send_to_telegram(message)
+        # Отправляем в Telegram с кнопками
+        success = send_to_telegram(order_data)
         
         if success:
-            logger.info("✅ Заказ отправлен в Telegram")
+            logger.info(f"✅ Заказ #{order_data.get('order_num')} отправлен в Telegram")
             return jsonify({"status": "success", "message": "Order processed"})
         else:
             logger.error("❌ Ошибка отправки в Telegram")
@@ -99,7 +98,6 @@ def webhook():
         logger.error(f"❌ Ошибка обработки webhook: {e}")
         return jsonify({"status": "error", "message": str(e)}), 400
 
-# Статус сервера
 @app.route('/')
 def home():
     return "Peshras Delivery Bot is running!"
