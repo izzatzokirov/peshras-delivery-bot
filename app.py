@@ -2,6 +2,8 @@ from flask import Flask, request, jsonify
 import requests
 import logging
 from datetime import datetime
+from threading import Thread
+import time
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -13,9 +15,12 @@ app = Flask(__name__)
 BOT_TOKEN = "8338994662:AAH7FALz3qd3F9dzcPadCVQY6CRPBXtFxiA"
 CHANNEL_ID = "-1002967095913"
 
+# Глобальный словарь для отслеживания заказов
+orders_status = {}
+
 def send_to_telegram(order_data):
     try:
-        # Формируем сообщение с артикулами
+        # Формируем сообщение
         message = f"🛒 Заказ #{order_data.get('order_num', 'N/A')}\n\n"
         
         # Добавляем товары с артикулами
@@ -25,17 +30,29 @@ def send_to_telegram(order_data):
                     name = item.get('order_line_name', 'Товар')
                     quantity = item.get('order_line_quantity', 1)
                     art = item.get('order_line_art_number', 'без артикула')
-                    price = item.get('order_line_sum', 0)
-                    
                     message += f"{i}. {name} {quantity}шт. арт {art}\n"
         
-        # Добавляем остальную информацию
-        message += f"\n💰 Сумма: {order_data.get('order_sum', 0)} сомони\n"
-        message += f"👤 Имя: {order_data.get('order_person', 'N/A')}\n"
-        message += f"📞 Телефон: {order_data.get('order_phone', 'N/A')}\n"
-        message += f"🏠 Адрес: {order_data.get('order_address', 'N/A')}\n"
-        message += f"⏰ Время: {convert_unix_time(order_data.get('order_time', ''))}\n"
-        message += f"💬 Комментарий: {order_data.get('order_comment', 'нет комментария')}\n"
+        # Добавляем информацию об оплате
+        payment_method = "Наличные"  # По умолчанию
+        if order_data.get('payment_name'):
+            payment_method = order_data.get('payment_name')
+        
+        message += f"\n💰 Сумма: {order_data.get('order_sum', 0)} сомони"
+        message += f"\n💳 Оплата: {payment_method}"
+        
+        # Кликабельный телефон
+        phone = order_data.get('order_phone', '')
+        if phone:
+            message += f"\n📞 Телефон: <a href=\"tel:{phone}\">{phone}</a>"
+        
+        # Остальная информация
+        message += f"\n👤 Имя: {order_data.get('order_person', 'N/A')}"
+        message += f"\n🏠 Адрес: {order_data.get('order_address', 'N/A')}"
+        message += f"\n⏰ Время: {convert_unix_time(order_data.get('order_time', ''))}"
+        
+        comment = order_data.get('order_comment', '')
+        if comment:
+            message += f"\n💬 Комментарий: {comment}"
 
         # Создаем кнопки
         keyboard = {
@@ -45,7 +62,8 @@ def send_to_telegram(order_data):
                     {"text": "🚗 В пути", "callback_data": f"delivery_{order_data.get('order_num')}"}
                 ],
                 [
-                    {"text": "✅ Доставлен", "callback_data": f"delivered_{order_data.get('order_num')}"}
+                    {"text": "✅ Доставлен", "callback_data": f"delivered_{order_data.get('order_num')}"},
+                    {"text": "📞 Позвонить", "callback_data": f"call_{order_data.get('order_num')}"}
                 ]
             ]
         }
@@ -56,7 +74,8 @@ def send_to_telegram(order_data):
             "chat_id": CHANNEL_ID,
             "text": message,
             "parse_mode": "HTML",
-            "reply_markup": keyboard
+            "reply_markup": keyboard,
+            "disable_web_page_preview": True
         }
         
         response = requests.post(url, json=payload, timeout=10)
@@ -72,12 +91,66 @@ def convert_unix_time(unix_time):
     except:
         return unix_time
 
+# Обработчик нажатий кнопок
+def handle_callback_updates():
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?timeout=30"
+            response = requests.get(url, timeout=35)
+            data = response.json()
+            
+            if data["ok"] and data["result"]:
+                for update in data["result"]:
+                    if "callback_query" in update:
+                        query = update["callback_query"]
+                        callback_data = query["data"]
+                        username = query["from"].get("username", query["from"]["first_name"])
+                        order_num = callback_data.split("_")[1]
+                        
+                        # Обновляем сообщение
+                        original_text = query["message"]["text"]
+                        
+                        if callback_data.startswith("accept_"):
+                            new_text = original_text + f"\n\n✅ Принял: @{username}"
+                        elif callback_data.startswith("delivery_"):
+                            new_text = original_text + f"\n\n🚗 В пути: @{username}"
+                        elif callback_data.startswith("delivered_"):
+                            new_text = original_text + f"\n\n✅ Доставлен: @{username}"
+                        elif callback_data.startswith("call_"):
+                            # Для кнопки "Позвонить" просто отвечаем
+                            answer_url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+                            requests.post(answer_url, json={"callback_query_id": query["id"], "text": "Нажмите на номер телефона выше ☝️"})
+                            continue
+                        
+                        # Редактируем сообщение
+                        edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+                        payload = {
+                            "chat_id": CHANNEL_ID,
+                            "message_id": query["message"]["message_id"],
+                            "text": new_text,
+                            "parse_mode": "HTML"
+                        }
+                        requests.post(edit_url, json=payload)
+                        
+                        # Подтверждаем обработку
+                        answer_url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+                        requests.post(answer_url, json={"callback_query_id": query["id"]})
+            
+            time.sleep(1)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в обработке кнопок: {e}")
+            time.sleep(5)
+
+# Запускаем обработчик кнопок
+callback_thread = Thread(target=handle_callback_updates, daemon=True)
+callback_thread.start()
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         logger.info("📨 Получен заказ от storelend.ru")
         
-        # Получаем данные
         order_data_str = request.form.get('order_data')
         if not order_data_str:
             return jsonify({"status": "error", "message": "No order_data"}), 400
@@ -85,7 +158,6 @@ def webhook():
         import json
         order_data = json.loads(order_data_str)
         
-        # Отправляем в Telegram
         success = send_to_telegram(order_data)
         
         if success:
@@ -102,87 +174,5 @@ def home():
     return "Peshras Delivery Bot is running!"
 
 if __name__ == '__main__':
+    logger.info("✅ Сервер и обработчик кнопок запущены!")
     app.run(host='0.0.0.0', port=5000)
-    # Добавьте эти импорты в начало файла
-from threading import Thread
-import time
-
-# Глобальный словарь для отслеживания заказов
-orders_status = {}
-
-# Функция для обработки нажатий кнопок
-def handle_callback_updates():
-    """Отдельный поток для обработки нажатий кнопок"""
-    while True:
-        try:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-            response = requests.get(url, timeout=10)
-            data = response.json()
-            
-            if data["ok"] and data["result"]:
-                for update in data["result"]:
-                    if "callback_query" in update:
-                        query = update["callback_query"]
-                        message_id = query["message"]["message_id"]
-                        callback_data = query["data"]
-                        username = query["from"].get("username", query["from"]["first_name"])
-                        
-                        # Обрабатываем разные действия
-                        if callback_data.startswith("accept_"):
-                            order_num = callback_data.split("_")[1]
-                            orders_status[order_num] = {"status": "принят", "courier": username}
-                            
-                            # Обновляем сообщение
-                            new_text = query["message"]["text"] + f"\n\n✅ Принял: @{username}"
-                            edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
-                            payload = {
-                                "chat_id": CHANNEL_ID,
-                                "message_id": message_id,
-                                "text": new_text,
-                                "parse_mode": "HTML"
-                            }
-                            requests.post(edit_url, json=payload)
-                            
-                        elif callback_data.startswith("delivery_"):
-                            order_num = callback_data.split("_")[1]
-                            orders_status[order_num] = {"status": "в пути", "courier": username}
-                            
-                            new_text = query["message"]["text"] + f"\n\n🚗 В пути: @{username}"
-                            edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
-                            payload = {
-                                "chat_id": CHANNEL_ID,
-                                "message_id": message_id,
-                                "text": new_text,
-                                "parse_mode": "HTML"
-                            }
-                            requests.post(edit_url, json=payload)
-                            
-                        elif callback_data.startswith("delivered_"):
-                            order_num = callback_data.split("_")[1]
-                            orders_status[order_num] = {"status": "доставлен", "courier": username}
-                            
-                            new_text = query["message"]["text"] + f"\n\n✅ Доставлен: @{username}"
-                            edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
-                            payload = {
-                                "chat_id": CHANNEL_ID,
-                                "message_id": message_id,
-                                "text": new_text,
-                                "parse_mode": "HTML"
-                            }
-                            requests.post(edit_url, json=payload)
-                        
-                        # Подтверждаем обработку callback
-                        answer_url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
-                        requests.post(answer_url, json={"callback_query_id": query["id"]})
-            
-            time.sleep(1)  # Проверяем каждую секунду
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка в обработке кнопок: {e}")
-            time.sleep(5)
-
-# Запускаем обработчик кнопок в отдельном потоке
-callback_thread = Thread(target=handle_callback_updates, daemon=True)
-callback_thread.start()
-
-logger.info("✅ Обработчик кнопок запущен!")
