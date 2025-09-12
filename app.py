@@ -3,6 +3,7 @@ import requests
 import logging
 from datetime import datetime
 import time
+from threading import Thread
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -45,15 +46,17 @@ def send_to_telegram(order_data):
         if comment:
             message += f"\n💬 Комментарий: {comment}"
 
-        # Простые кнопки (без сложной логики)
+        # Кнопки с номером заказа
+        order_num = order_data.get('order_num', '')
         keyboard = {
             "inline_keyboard": [
                 [
-                    {"text": "✅ Принял", "callback_data": "accept"},
-                    {"text": "🚗 В пути", "callback_data": "delivery"}
+                    {"text": "✅ Принял", "callback_data": f"accept_{order_num}"},
+                    {"text": "🚗 В пути", "callback_data": f"delivery_{order_num}"},
+                    {"text": "✅ Доставлен", "callback_data": f"delivered_{order_num}"}
                 ],
                 [
-                    {"text": "✅ Доставлен", "callback_data": "delivered"}
+                    {"text": "📞 Позвонить", "callback_data": f"call_{order_num}"}
                 ]
             ]
         }
@@ -80,6 +83,76 @@ def convert_unix_time(unix_time):
         return datetime.fromtimestamp(int(unix_time)).strftime('%Y-%m-%d %H:%M:%S')
     except:
         return unix_time
+
+# Функция для обработки нажатий кнопок
+def handle_callback_updates():
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?timeout=10"
+            response = requests.get(url, timeout=15)
+            data = response.json()
+            
+            if data["ok"] and data["result"]:
+                for update in data["result"]:
+                    if "callback_query" in update:
+                        query = update["callback_query"]
+                        callback_data = query["data"]
+                        username = query["from"].get("username", query["from"]["first_name"])
+                        
+                        if callback_data.startswith(("accept_", "delivery_", "delivered_", "call_")):
+                            order_num = callback_data.split("_")[1]
+                            
+                            # Получаем текущее сообщение
+                            message_text = query["message"]["text"]
+                            message_id = query["message"]["message_id"]
+                            
+                            # Обновляем текст в зависимости от действия
+                            if callback_data.startswith("accept_"):
+                                new_text = message_text + f"\n\n✅ Принял: @{username}"
+                            elif callback_data.startswith("delivery_"):
+                                new_text = message_text + f"\n\n🚗 В пути: @{username}"
+                            elif callback_data.startswith("delivered_"):
+                                new_text = message_text + f"\n\n✅ Доставлен: @{username}"
+                            elif callback_data.startswith("call_"):
+                                # Для кнопки "Позвонить" просто отвечаем
+                                answer_url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+                                requests.post(answer_url, json={
+                                    "callback_query_id": query["id"],
+                                    "text": "Нажмите на номер телефона выше ☝️"
+                                })
+                                continue
+                            
+                            # Сохраняем оригинальные кнопки
+                            original_keyboard = query["message"]["reply_markup"]
+                            
+                            # Обновляем сообщение с теми же кнопками
+                            edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+                            payload = {
+                                "chat_id": CHANNEL_ID,
+                                "message_id": message_id,
+                                "text": new_text,
+                                "parse_mode": "HTML",
+                                "reply_markup": original_keyboard,
+                                "disable_web_page_preview": True
+                            }
+                            requests.post(edit_url, json=payload)
+                            
+                            # Подтверждаем обработку
+                            answer_url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+                            requests.post(answer_url, json={
+                                "callback_query_id": query["id"],
+                                "text": "Статус обновлен! ✅"
+                            })
+            
+            time.sleep(2)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в обработке кнопок: {e}")
+            time.sleep(5)
+
+# Запускаем обработчик кнопок в отдельном потоке
+callback_thread = Thread(target=handle_callback_updates, daemon=True)
+callback_thread.start()
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -109,5 +182,5 @@ def home():
     return "Peshras Delivery Bot is running!"
 
 if __name__ == '__main__':
-    logger.info("✅ Сервер запущен!")
+    logger.info("✅ Сервер запущен! Обработчик кнопок активен!")
     app.run(host='0.0.0.0', port=5000)
