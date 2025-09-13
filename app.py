@@ -17,11 +17,23 @@ CHANNEL_ID = "-1002967095913"
 
 # Для хранения статусов заказов
 orders_status = {}
+processed_orders = {}
 
 def send_to_telegram(order_data):
     try:
+        order_num = order_data.get('order_num')
+        
+        # Защита от дубликатов
+        current_time = time.time()
+        if order_num in processed_orders:
+            if current_time - processed_orders[order_num] < 300:
+                logger.warning(f"⚠️ Дубликат заказа #{order_num} - игнорируем")
+                return True
+        
+        processed_orders[order_num] = current_time
+        
         # Формируем сообщение
-        message = f"🛒 Заказ #{order_data.get('order_num', 'N/A')}\n\n"
+        message = f"🛒 Заказ #{order_num}\n\n"
         
         # Товары
         if 'line' in order_data and isinstance(order_data['line'], list):
@@ -49,8 +61,7 @@ def send_to_telegram(order_data):
         if comment:
             message += f"\n💬 Комментарий: {comment}"
 
-        # Кнопки для нового заказа (все видимые)
-        order_num = order_data.get('order_num', '')
+        # Кнопки для нового заказа
         keyboard = {
             "inline_keyboard": [
                 [
@@ -84,19 +95,72 @@ def convert_unix_time(unix_time):
     except:
         return unix_time
 
-def update_message_with_new_buttons(message_id, new_text, new_keyboard):
-    """Обновляем сообщение с новыми кнопками"""
+def handle_callback(callback_data, user_id, username, message_id, current_text):
+    """Обработка нажатий кнопок"""
     try:
-        edit_url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+        if callback_data.startswith(("accept_", "delivery_", "delivered_")):
+            order_num = callback_data.split('_')[1]
+            action_type = callback_data.split('_')[0]
+            
+            # Очищаем предыдущие статусы
+            cleaned_text = re.sub(r'\n\n✅ Принял:.*|\n\n🚗 В пути:.*|\n\n✅ Доставлен:.*', '', current_text)
+            
+            if action_type == "accept":
+                if order_num not in orders_status:
+                    orders_status[order_num] = {
+                        'status': 'accepted',
+                        'courier_id': user_id,
+                        'courier_name': username
+                    }
+                    new_text = cleaned_text + f"\n\n✅ Принял: @{username}"
+                    new_keyboard = {
+                        "inline_keyboard": [
+                            [
+                                {"text": "🚗 В пути", "callback_data": f"delivery_{order_num}"},
+                                {"text": "✅ Доставлен", "callback_data": f"delivered_{order_num}"}
+                            ]
+                        ]
+                    }
+                    return update_message(message_id, new_text, new_keyboard)
+            
+            elif action_type == "delivery":
+                if (order_num in orders_status and 
+                    orders_status[order_num]['courier_id'] == user_id):
+                    new_text = cleaned_text + f"\n\n🚗 В пути: @{username}"
+                    new_keyboard = {
+                        "inline_keyboard": [
+                            [
+                                {"text": "✅ Доставлен", "callback_data": f"delivered_{order_num}"}
+                            ]
+                        ]
+                    }
+                    return update_message(message_id, new_text, new_keyboard)
+            
+            elif action_type == "delivered":
+                if (order_num in orders_status and 
+                    orders_status[order_num]['courier_id'] == user_id):
+                    new_text = cleaned_text + f"\n\n✅ Доставлен: @{username}"
+                    new_keyboard = {"inline_keyboard": []}  # Убираем все кнопки
+                    return update_message(message_id, new_text, new_keyboard)
+            
+            return False
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки callback: {e}")
+        return False
+
+def update_message(message_id, text, keyboard):
+    """Обновление сообщения в Telegram"""
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
         payload = {
             "chat_id": CHANNEL_ID,
             "message_id": message_id,
-            "text": new_text,
+            "text": text,
             "parse_mode": "HTML",
-            "reply_markup": new_keyboard,
+            "reply_markup": keyboard,
             "disable_web_page_preview": True
         }
-        response = requests.post(edit_url, json=payload, timeout=10)
+        response = requests.post(url, json=payload, timeout=10)
         return response.status_code == 200
     except Exception as e:
         logger.error(f"❌ Ошибка обновления сообщения: {e}")
@@ -125,11 +189,11 @@ def webhook():
         logger.error(f"❌ Ошибка: {e}")
         return jsonify({"status": "error"}), 400
 
-# Простой обработчик кнопок (без многопоточности)
+# Обработчик для callback от Telegram
 @app.route('/callback', methods=['POST'])
-def callback_handler():
+def callback():
     try:
-        data = request.json
+        data = request.get_json()
         if 'callback_query' in data:
             query = data['callback_query']
             callback_data = query['data']
@@ -138,70 +202,19 @@ def callback_handler():
             message_id = query['message']['message_id']
             current_text = query['message']['text']
             
-            if callback_data.startswith(("accept_", "delivery_", "delivered_")):
-                order_num = callback_data.split('_')[1]
-                action_type = callback_data.split('_')[0]
-                
-                # Обработка разных действий
-                if action_type == "accept":
-                    # Проверяем, не принят ли уже заказ
-                    if order_num not in orders_status:
-                        orders_status[order_num] = {
-                            'status': 'accepted',
-                            'courier_id': user_id,
-                            'courier_name': username
-                        }
-                        
-                        # Обновляем текст и кнопки
-                        new_text = current_text + f"\n\n✅ Принял: @{username}"
-                        new_keyboard = {
-                            "inline_keyboard": [
-                                [
-                                    {"text": "🚗 В пути", "callback_data": f"delivery_{order_num}"},
-                                    {"text": "✅ Доставлен", "callback_data": f"delivered_{order_num}"}
-                                ]
-                            ]
-                        }
-                        
-                        if update_message_with_new_buttons(message_id, new_text, new_keyboard):
-                            return jsonify({"status": "success"})
-                
-                elif action_type == "delivery":
-                    # Проверяем, что заказ принят этим курьером
-                    if (order_num in orders_status and 
-                        orders_status[order_num]['courier_id'] == user_id):
-                        
-                        new_text = re.sub(r'\n\n✅ Принял:.*|\n\n🚗 В пути:.*|\n\n✅ Доставлен:.*', '', current_text)
-                        new_text += f"\n\n🚗 В пути: @{username}"
-                        new_keyboard = {
-                            "inline_keyboard": [
-                                [
-                                    {"text": "✅ Доставлен", "callback_data": f"delivered_{order_num}"}
-                                ]
-                            ]
-                        }
-                        
-                        if update_message_with_new_buttons(message_id, new_text, new_keyboard):
-                            return jsonify({"status": "success"})
-                
-                elif action_type == "delivered":
-                    # Проверяем, что заказ принят этим курьером
-                    if (order_num in orders_status and 
-                        orders_status[order_num]['courier_id'] == user_id):
-                        
-                        new_text = re.sub(r'\n\n✅ Принял:.*|\n\n🚗 В пути:.*|\n\n✅ Доставлен:.*', '', current_text)
-                        new_text += f"\n\n✅ Доставлен: @{username}"
-                        new_keyboard = {"inline_keyboard": []}  # Убираем все кнопки
-                        
-                        if update_message_with_new_buttons(message_id, new_text, new_keyboard):
-                            return jsonify({"status": "success"})
-                
-                return jsonify({"status": "error", "message": "Действие невозможно"}), 400
+            success = handle_callback(callback_data, user_id, username, message_id, current_text)
+            
+            # Ответ для Telegram
+            if success:
+                requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery", 
+                             json={"callback_query_id": query['id']})
+            
+            return jsonify({"status": "success"})
         
-        return jsonify({"status": "success"})
+        return jsonify({"status": "error"}), 400
         
     except Exception as e:
-        logger.error(f"❌ Ошибка обработки callback: {e}")
+        logger.error(f"❌ Ошибка callback: {e}")
         return jsonify({"status": "error"}), 500
 
 @app.route('/')
@@ -209,5 +222,5 @@ def home():
     return "Peshras Delivery Bot is running!"
 
 if __name__ == '__main__':
-    logger.info("✅ Сервер запущен!")
+    logger.info("✅ Сервер запущен с работающими кнопками!")
     app.run(host='0.0.0.0', port=5000)
