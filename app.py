@@ -61,7 +61,7 @@ def send_to_telegram(order_data):
         message += f"\n👤 Имя: {order_data.get('order_person', 'N/A')}"
         message += f"\n🏠 Адрес: {order_data.get('order_address', 'N/A')}"
         
-        # ИСПРАВЛЕНО: Используем время из заказа Storelend
+        # Используем время из заказа Storelend
         order_time = order_data.get('order_time', '')
         if order_time:
             message += f"\n⏰ Время: {convert_unix_time(order_time)}"
@@ -72,24 +72,13 @@ def send_to_telegram(order_data):
         if comment:
             message += f"\n💬 Комментарий: {comment}"
 
-        # ПРОСТЫЕ РАБОЧИЕ КНОПКИ-ССЫЛКИ
+        # ПРОСТЫЕ КНОПКИ КАК РАНЬШЕ
         keyboard = {
             "inline_keyboard": [
                 [
-                    {
-                        "text": "✅ Принял", 
-                        "url": f"https://t.me/share/url?text=✅ Принял заказ {order_num} (Peshras)"
-                    },
-                    {
-                        "text": "🚗 В пути", 
-                        "url": f"https://t.me/share/url?text=🚗 В пути с заказом {order_num} (Peshras)"
-                    }
-                ],
-                [
-                    {
-                        "text": "✅ Доставлен", 
-                        "url": f"https://t.me/share/url?text=✅ Доставил заказ {order_num} (Peshras)"
-                    }
+                    {"text": "✅ Принять", "callback_data": f"accept_{order_num}"},
+                    {"text": "🚗 В пути", "callback_data": f"delivery_{order_num}"},
+                    {"text": "✅ Доставлен", "callback_data": f"delivered_{order_num}"}
                 ]
             ]
         }
@@ -111,6 +100,26 @@ def send_to_telegram(order_data):
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
 
+# Простой обработчик кнопок
+@app.route('/button/<action>/<order_num>/<username>')
+def handle_button(action, order_num, username):
+    try:
+        logger.info(f"🔘 Нажата кнопка: {action} на заказ #{order_num} пользователем @{username}")
+        
+        # Просто логируем нажатие - кнопки будут отображаться
+        if action == "accept":
+            return f"✅ @{username} принял заказ #{order_num}"
+        elif action == "delivery":
+            return f"🚗 @{username} в пути с заказом #{order_num}"
+        elif action == "delivered":
+            return f"✅ @{username} доставил заказ #{order_num}"
+        else:
+            return "❌ Неизвестное действие", 400
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка обработки кнопки: {e}")
+        return f"❌ Ошибка: {e}", 500
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -122,9 +131,6 @@ def webhook():
         
         import json
         order_data = json.loads(order_data_str)
-        
-        # Логируем данные для отладки
-        logger.info(f"📦 Данные заказа: {order_data}")
         
         success = send_to_telegram(order_data)
         
@@ -139,8 +145,8 @@ def webhook():
 
 @app.route('/')
 def home():
-    return "Peshras Delivery Bot is running! Кнопки-ссылки работают!"
+    return "Peshras Delivery Bot is running!"
 
 if __name__ == '__main__':
-    logger.info("✅ Сервер запущен с рабочими кнопками-ссылками!")
+    logger.info("✅ Сервер запущен!")
     app.run(host='0.0.0.0', port=5000)
