@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 # КОНФИГУРАЦИЯ
 BOT_TOKEN = "8338994662:AAH7FALz3qd3F9dzcPadCVQY6CRPBXtFxiA"
-CHANNEL_ID = "-1002967095913"
+CHANNEL_ID = "-10031287885760"
 
 # Словарь для отслеживания статусов заказов
 orders_status = {}
