@@ -3,7 +3,6 @@ import requests
 import logging
 from datetime import datetime
 import time
-import re
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -15,9 +14,15 @@ app = Flask(__name__)
 BOT_TOKEN = "8338994662:AAH7FALz3qd3F9dzcPadCVQY6CRPBXtFxiA"
 CHANNEL_ID = "-1002967095913"
 
-# Для хранения статусов заказов
-orders_db = {}
+# Для защиты от дубликатов
 processed_orders = {}
+
+def convert_unix_time(unix_time):
+    """Конвертируем Unix время в нормальное"""
+    try:
+        return datetime.fromtimestamp(int(unix_time)).strftime('%Y-%m-%d %H:%M:%S')
+    except:
+        return "Время не указано"
 
 def send_to_telegram(order_data):
     try:
@@ -32,7 +37,7 @@ def send_to_telegram(order_data):
         
         processed_orders[order_num] = current_time
         
-        # Формируем сообщение
+        # Формируем сообщение с правильным временем
         message = f"🛒 Заказ #{order_num}\n\n"
         
         # Товары
@@ -55,19 +60,36 @@ def send_to_telegram(order_data):
         
         message += f"\n👤 Имя: {order_data.get('order_person', 'N/A')}"
         message += f"\n🏠 Адрес: {order_data.get('order_address', 'N/A')}"
-        message += f"\n⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        # ИСПРАВЛЕНО: Используем время из заказа Storelend
+        order_time = order_data.get('order_time', '')
+        if order_time:
+            message += f"\n⏰ Время: {convert_unix_time(order_time)}"
+        else:
+            message += f"\n⏰ Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
         comment = order_data.get('order_comment', '')
         if comment:
             message += f"\n💬 Комментарий: {comment}"
 
-        # Кнопки для нового заказа
+        # ПРОСТЫЕ РАБОЧИЕ КНОПКИ-ССЫЛКИ
         keyboard = {
             "inline_keyboard": [
                 [
-                    {"text": "✅ Принять", "callback_data": f"accept_{order_num}"},
-                    {"text": "🚗 В пути", "callback_data": f"delivery_{order_num}"},
-                    {"text": "✅ Доставлен", "callback_data": f"delivered_{order_num}"}
+                    {
+                        "text": "✅ Принял", 
+                        "url": f"https://t.me/share/url?text=✅ Принял заказ {order_num} (Peshras)"
+                    },
+                    {
+                        "text": "🚗 В пути", 
+                        "url": f"https://t.me/share/url?text=🚗 В пути с заказом {order_num} (Peshras)"
+                    }
+                ],
+                [
+                    {
+                        "text": "✅ Доставлен", 
+                        "url": f"https://t.me/share/url?text=✅ Доставил заказ {order_num} (Peshras)"
+                    }
                 ]
             ]
         }
@@ -83,120 +105,11 @@ def send_to_telegram(order_data):
         }
         
         response = requests.post(url, json=payload, timeout=10)
-        
-        if response.status_code == 200:
-            # Сохраняем ID сообщения
-            message_id = response.json()['result']['message_id']
-            orders_db[order_num] = {
-                'message_id': message_id,
-                'status': 'new',
-                'courier': None,
-                'message_text': message
-            }
-            return True
-        return False
+        return response.status_code == 200
         
     except Exception as e:
         logger.error(f"❌ Ошибка отправки: {e}")
         return False
-
-def update_telegram_message(order_num, new_text, new_keyboard=None):
-    """Обновляем сообщение в Telegram"""
-    try:
-        if order_num not in orders_db:
-            return False
-            
-        message_id = orders_db[order_num]['message_id']
-        
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
-        payload = {
-            "chat_id": CHANNEL_ID,
-            "message_id": message_id,
-            "text": new_text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }
-        
-        if new_keyboard:
-            payload["reply_markup"] = new_keyboard
-        
-        response = requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка обновления сообщения: {e}")
-        return False
-
-def handle_order_action(order_num, action, username):
-    """Обработка действий с заказом"""
-    try:
-        if order_num not in orders_db:
-            return False, "Заказ не найден"
-            
-        current_status = orders_db[order_num]['status']
-        current_courier = orders_db[order_num]['courier']
-        
-        # Проверяем возможность действия
-        if action == "accept":
-            if current_status != "new":
-                return False, "Заказ уже взят"
-                
-            orders_db[order_num]['status'] = "accepted"
-            orders_db[order_num]['courier'] = username
-            
-            new_text = orders_db[order_num]['message_text'] + f"\n\n✅ Принял: @{username}"
-            new_keyboard = {
-                "inline_keyboard": [
-                    [
-                        {"text": "🚗 В пути", "callback_data": f"delivery_{order_num}"},
-                        {"text": "✅ Доставлен", "callback_data": f"delivered_{order_num}"}
-                    ]
-                ]
-            }
-            
-        elif action == "delivery":
-            if current_status != "accepted" or current_courier != username:
-                return False, "Нельзя изменить статус"
-                
-            orders_db[order_num]['status'] = "delivery"
-            
-            # Удаляем предыдущие статусы и добавляем новый
-            original_text = orders_db[order_num]['message_text']
-            cleaned_text = re.sub(r'\n\n✅ Принял:.*|\n\n🚗 В пути:.*|\n\n✅ Доставлен:.*', '', original_text)
-            new_text = cleaned_text + f"\n\n🚗 В пути: @{username}"
-            new_keyboard = {
-                "inline_keyboard": [
-                    [
-                        {"text": "✅ Доставлен", "callback_data": f"delivered_{order_num}"}
-                    ]
-                ]
-            }
-            
-        elif action == "delivered":
-            if current_status not in ["accepted", "delivery"] or current_courier != username:
-                return False, "Нельзя отметить доставленным"
-                
-            orders_db[order_num]['status'] = "delivered"
-            
-            original_text = orders_db[order_num]['message_text']
-            cleaned_text = re.sub(r'\n\n✅ Принял:.*|\n\n🚗 В пути:.*|\n\n✅ Доставлен:.*', '', original_text)
-            new_text = cleaned_text + f"\n\n✅ Доставлен: @{username}"
-            new_keyboard = {"inline_keyboard": []}  # Убираем все кнопки
-            
-        else:
-            return False, "Неизвестное действие"
-        
-        # Обновляем сообщение в Telegram
-        success = update_telegram_message(order_num, new_text, new_keyboard)
-        if success:
-            orders_db[order_num]['message_text'] = new_text
-            return True, "Статус обновлен"
-        else:
-            return False, "Ошибка обновления"
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка обработки действия: {e}")
-        return False, "Ошибка системы"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -210,6 +123,9 @@ def webhook():
         import json
         order_data = json.loads(order_data_str)
         
+        # Логируем данные для отладки
+        logger.info(f"📦 Данные заказа: {order_data}")
+        
         success = send_to_telegram(order_data)
         
         if success:
@@ -221,45 +137,10 @@ def webhook():
         logger.error(f"❌ Ошибка: {e}")
         return jsonify({"status": "error"}), 400
 
-# Обработчик кнопок через GET (простой и рабочий)
-@app.route('/button/<action>/<order_num>/<username>')
-def handle_button(action, order_num, username):
-    try:
-        logger.info(f"🔘 Нажата кнопка: {action} на заказ #{order_num} пользователем @{username}")
-        
-        success, message = handle_order_action(order_num, action, username)
-        
-        if success:
-            return f"✅ {message}"
-        else:
-            return f"❌ {message}", 400
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка обработки кнопки: {e}")
-        return f"❌ Ошибка системы: {e}", 500
-
-# Веб-интерфейс для тестирования кнопок
-@app.route('/test_buttons')
-def test_buttons():
-    html = """
-    <html>
-    <body>
-        <h2>Тест кнопок для заказа #836</h2>
-        <p>Имитация разных курьеров:</p>
-        <a href="/button/accept/836/Али" style="padding:10px;background:green;color:white;margin:5px;">Али: Принять</a>
-        <a href="/button/delivery/836/Али" style="padding:10px;background:blue;color:white;margin:5px;">Али: В пути</a>
-        <a href="/button/delivered/836/Али" style="padding:10px;background:red;color:white;margin:5px;">Али: Доставлен</a>
-        <br>
-        <a href="/button/accept/836/Ахмад" style="padding:10px;background:green;color:white;margin:5px;">Ахмад: Принять</a>
-    </body>
-    </html>
-    """
-    return html
-
 @app.route('/')
 def home():
-    return "Peshras Delivery Bot is running! Кнопки работают!"
+    return "Peshras Delivery Bot is running! Кнопки-ссылки работают!"
 
 if __name__ == '__main__':
-    logger.info("✅ Сервер запущен с рабочими кнопками!")
+    logger.info("✅ Сервер запущен с рабочими кнопками-ссылками!")
     app.run(host='0.0.0.0', port=5000)
